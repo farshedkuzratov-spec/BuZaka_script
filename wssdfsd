@@ -1,0 +1,231 @@
+-- ============================================================
+-- FTAP Trigger Bot — читает состояние граба из игры
+-- ============================================================
+local Players    = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS        = game:GetService("UserInputService")
+local VIM        = game:GetService("VirtualInputManager")
+local LP         = Players.LocalPlayer
+local Cam        = workspace.CurrentCamera
+
+-- ===== Настройки =====
+local MAX_DIST        = 60
+local ANGLE           = math.rad(8)
+local REGRAB_COOLDOWN = 0.2    -- пауза после отпускания, чтобы не схватить мгновенно
+local DEBUG           = true   -- печатать в консоль что происходит
+
+-- ===== Состояние =====
+local enabled       = false
+local lastRelease   = 0
+local lastGrabTry   = 0
+local wasHolding    = false
+
+-- ============================================================
+-- ГЛАВНОЕ: определяем реально ли мы держим что-то, через игру
+-- ============================================================
+local function isActuallyHolding()
+    -- Вариант 1: папка GrabParts существует → мы держим линию
+    if workspace:FindFirstChild("GrabParts") then
+        return true
+    end
+
+    -- Вариант 2: у нас есть weld на часть с "PartOwner" == наш ник
+    local char = LP.Character
+    if char then
+        for _, obj in ipairs(char:GetChildren()) do
+            if obj:IsA("BasePart") then
+                local owner = obj:FindFirstChild("PartOwner")
+                if owner and owner:IsA("StringValue") and owner.Value == LP.Name then
+                    return true
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+-- ============================================================
+-- Поиск цели под прицелом
+-- ============================================================
+local function targetUnderCrosshair()
+    local char = LP.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
+
+    local camPos  = Cam.CFrame.Position
+    local lookVec = Cam.CFrame.LookVector
+
+    local best, bestA = nil, ANGLE
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LP and plr.Character then
+            local hum  = plr.Character:FindFirstChildOfClass("Humanoid")
+            local part = plr.Character:FindFirstChild("HumanoidRootPart")
+            if hum and hum.Health > 0 and part then
+                local dist = (part.Position - camPos).Magnitude
+                if dist <= MAX_DIST then
+                    local dir = (part.Position - camPos).Unit
+                    local a   = math.acos(math.clamp(lookVec:Dot(dir), -1, 1))
+                    if a < bestA then
+                        bestA = a
+                        best  = plr
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- ============================================================
+-- Нажатие ЛКМ (несколько способов на всякий случай)
+-- ============================================================
+local function pressMouse()
+    local vp = Cam.ViewportSize
+    local cx, cy = math.floor(vp.X / 2), math.floor(vp.Y / 2)
+
+    pcall(function() VIM:SendMouseMoveEvent(cx, cy, game) end)
+    pcall(function() VIM:SendMouseButtonEvent(cx, cy, 0, true, game, 0) end)
+    pcall(function() mouse1press() end)
+end
+
+local function releaseMouse()
+    local vp = Cam.ViewportSize
+    local cx, cy = math.floor(vp.X / 2), math.floor(vp.Y / 2)
+
+    pcall(function() VIM:SendMouseButtonEvent(cx, cy, 0, false, game, 0) end)
+    pcall(function() mouse1release() end)
+end
+
+-- ============================================================
+-- Основной цикл — читаем состояние ИЗ ИГРЫ каждый кадр
+-- ============================================================
+RunService.RenderStepped:Connect(function()
+    if not enabled then return end
+
+    local now = tick()
+    local holding = isActuallyHolding()
+
+    -- Если только что перестали держать (игра убрала GrabParts)
+    if wasHolding and not holding then
+        lastRelease = now
+        if DEBUG then print("[FTAP] Обнаружено отпускание → cooldown") end
+    end
+    wasHolding = holding
+
+    -- Уже держим — ничего не делаем
+    if holding then return end
+
+    -- Кулдаун после отпускания чтобы не схватить сразу того же
+    if (now - lastRelease) < REGRAB_COOLDOWN then return end
+
+    -- Кулдаун между попытками захвата
+    if (now - lastGrabTry) < 0.1 then return end
+
+    -- Есть цель под прицелом → пробуем схватить
+    local t = targetUnderCrosshair()
+    if t then
+        lastGrabTry = now
+        pressMouse()
+        if DEBUG then
+            print("[FTAP] GRAB на " .. t.Name)
+        end
+    end
+end)
+
+-- ============================================================
+-- Страховка: если скрипт выключен — отпустить
+-- ============================================================
+UIS.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    -- ПКМ (бросок) — можно не трогать, игра сама отпустит
+end)
+
+-- ============================================================
+-- GUI
+-- ============================================================
+local gui = Instance.new("ScreenGui")
+gui.ResetOnSpawn = false
+gui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+
+local f = Instance.new("Frame", gui)
+f.Size = UDim2.new(0, 200, 0, 100)
+f.Position = UDim2.new(0, 30, 0, 120)
+f.BackgroundColor3 = Color3.fromRGB(20, 22, 28)
+f.Active = true
+f.Draggable = true
+f.BorderSizePixel = 0
+Instance.new("UICorner", f).CornerRadius = UDim.new(0, 8)
+local s = Instance.new("UIStroke", f)
+s.Color = Color3.fromRGB(80, 120, 220)
+s.Thickness = 1.5
+
+local t = Instance.new("TextLabel", f)
+t.Size = UDim2.new(1, 0, 0, 24)
+t.BackgroundTransparency = 1
+t.Text = "FTAP Trigger"
+t.TextColor3 = Color3.fromRGB(230, 230, 255)
+t.Font = Enum.Font.GothamBold
+t.TextSize = 13
+
+local b = Instance.new("TextButton", f)
+b.Size = UDim2.new(1, -20, 0, 32)
+b.Position = UDim2.new(0, 10, 0, 28)
+b.BackgroundColor3 = Color3.fromRGB(50, 55, 70)
+b.Text = "ВЫКЛ"
+b.TextColor3 = Color3.fromRGB(220, 220, 220)
+b.Font = Enum.Font.GothamBold
+b.TextSize = 13
+b.BorderSizePixel = 0
+Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+
+-- Индикатор состояния
+local status = Instance.new("TextLabel", f)
+status.Size = UDim2.new(1, -20, 0, 20)
+status.Position = UDim2.new(0, 10, 0, 66)
+status.BackgroundTransparency = 1
+status.Text = "Статус: —"
+status.TextColor3 = Color3.fromRGB(150, 170, 210)
+status.Font = Enum.Font.Gotham
+status.TextSize = 11
+status.TextXAlignment = Enum.TextXAlignment.Left
+
+b.MouseButton1Click:Connect(function()
+    enabled = not enabled
+    if enabled then
+        b.Text = "ВКЛ"
+        b.BackgroundColor3 = Color3.fromRGB(40, 160, 80)
+        if DEBUG then print("[FTAP] ON") end
+    else
+        b.Text = "ВЫКЛ"
+        b.BackgroundColor3 = Color3.fromRGB(50, 55, 70)
+        if isActuallyHolding() then releaseMouse() end
+        if DEBUG then print("[FTAP] OFF") end
+    end
+end)
+
+task.spawn(function()
+    while gui.Parent do
+        if enabled then
+            if isActuallyHolding() then
+                status.Text = "Статус: ДЕРЖУ"
+                status.TextColor3 = Color3.fromRGB(80, 220, 120)
+            else
+                local tgt = targetUnderCrosshair()
+                if tgt then
+                    status.Text = "Статус: цель " .. tgt.Name
+                    status.TextColor3 = Color3.fromRGB(220, 180, 80)
+                else
+                    status.Text = "Статус: жду цель"
+                    status.TextColor3 = Color3.fromRGB(150, 170, 210)
+                end
+            end
+        else
+            status.Text = "Статус: выкл"
+            status.TextColor3 = Color3.fromRGB(150, 150, 150)
+        end
+        task.wait(0.15)
+    end
+end)
+
+print("[FTAP Trigger] загружен")
